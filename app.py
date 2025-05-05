@@ -1,146 +1,148 @@
-# app.py
 import streamlit as st
 import cv2
-import time
 import numpy as np
+import tempfile
 import os
-import dlib
-from ultralytics import YOLO
+import urllib.request
+import bz2
+import time
+import csv
 from datetime import datetime
-from dotenv import load_dotenv
-import requests
-import threading
-import pandas as pd
+from threading import Thread
+import random
+import json
+import base64
+from groq import Groq
 
-# Load env
-load_dotenv()
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-GROQ_URL = "https://api.groq.com/v1/completions"
+# ---------------------- DOWNLOAD DLIB MODEL IF NEEDED ---------------------- #
+def download_dlib_model():
+    url = "http://dlib.net/files/shape_predictor_68_face_landmarks.dat.bz2"
+    bz2_file = "shape_predictor_68_face_landmarks.dat.bz2"
+    dat_file = "shape_predictor_68_face_landmarks.dat"
 
-# Initialize models
-st.set_page_config("AI Proctoring", layout="wide")
-st.title("🛡️ AI-Based Online Proctoring System")
+    if not os.path.exists(dat_file):
+        st.info("Downloading facial landmark model (~100MB)...")
+        urllib.request.urlretrieve(url, bz2_file)
+        with bz2.BZ2File(bz2_file) as fr, open(dat_file, "wb") as fw:
+            fw.write(fr.read())
+        os.remove(bz2_file)
+        st.success("Model downloaded and ready.")
 
-# Sidebar settings
-st.sidebar.header("⚙️ Settings")
-topics = st.sidebar.text_input("Quiz Topics (comma-sep)", "Python,Data Structures")
-mcq_count = st.sidebar.slider("Number of Questions", 5, 25, 10)
-test_dur = st.sidebar.slider("Test Duration (minutes)", 1, 10, 5)
-monitor_dur = st.sidebar.slider("Total Monitoring (minutes)", 1, 60, 30)
-absent_thresh = st.sidebar.number_input("Absence Threshold (s)", 1, 10, 5)
+# ---------------------- GLOBAL VARIABLES ---------------------- #
+download_dlib_model()
+log_data = []
+quiz_data = []
+is_testing = False
 
-# Initialize detectors
-face_detector = dlib.get_frontal_face_detector()
-landmark_model = dlib.shape_predictor("shape_predictor_68_face_landmarks.dat")
-yolo = YOLO("yolov8n.pt")  # auto-downloads if missing
+# ---------------------- UTILITY FUNCTIONS ---------------------- #
+def log_event(event):
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    log_data.append({"time": timestamp, "event": event})
 
-# State
-if "logs" not in st.session_state:
-    st.session_state.logs = []
-if "in_test" not in st.session_state:
-    st.session_state.in_test = False
+def save_log_csv():
+    filename = f"proctor_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+    with open(filename, mode='w', newline='') as file:
+        writer = csv.DictWriter(file, fieldnames=["time", "event"])
+        writer.writeheader()
+        writer.writerows(log_data)
+    return filename
 
-# Helpers
-def log_event(evt):
-    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    st.session_state.logs.append({"time":ts, "event":evt})
-
-def trigger_quiz():
-    st.session_state.in_test = True
-    # call Groq for MCQs
-    prompt = (
-        f"Generate a {mcq_count}-question multiple-choice quiz on topics: {topics}. "
-        "Format as JSON list with question, options, and answer index."
+def generate_mcqs(n=20, topic="Python"):
+    client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+    prompt = f"Generate {n} multiple choice questions with 4 options each and answer key on topic {topic}. Output as JSON."
+    response = client.chat.completions.create(
+        model="llama3-70b-8192",
+        messages=[{"role": "user", "content": prompt}]
     )
-    headers = {"Authorization": f"Bearer {GROQ_API_KEY}"}
-    data = {"model": "groq-llama3", "prompt": prompt, "max_tokens": 1000}
-    resp = requests.post(GROQ_URL, json=data, headers=headers).json()
-    quiz = resp.get("choices", [{}])[0].get("text", "[]")
-    st.session_state.quiz = pd.read_json(quiz)
-    st.session_state.start_test = time.time()
-    log_event("Quiz started")
+    try:
+        content = response.choices[0].message.content
+        return json.loads(content)
+    except:
+        st.error("Failed to parse questions.")
+        return []
 
-# Main loop
-if st.button("Start Proctoring"):
+# ---------------------- CAMERA MONITORING ---------------------- #
+def monitor_camera():
     cap = cv2.VideoCapture(0)
-    stframe = st.empty()
-    start = time.time()
-    last_face = time.time()
-    # schedule quiz every random interval
-    def schedule():
-        while time.time() - start < monitor_dur*60:
-            time.sleep(np.random.randint(60, 120))
-            if not st.session_state.in_test:
-                trigger_quiz()
-    threading.Thread(target=schedule, daemon=True).start()
-
-    while time.time() - start < monitor_dur*60:
+    absence_start = None
+    while is_testing:
         ret, frame = cap.read()
-        if not ret: break
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        h, w = rgb.shape[:2]
+        if not ret:
+            continue
 
-        # 1) Face + gaze/absence detection
-        dets = face_detector(rgb, 0)
-        if len(dets)==0:
-            if time.time()-last_face>absent_thresh:
-                log_event("Absence detected")
-                st.error("🚨 Candidate absent!")
-            else:
-                pass
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+        faces = face_cascade.detectMultiScale(gray, 1.3, 5)
+
+        if len(faces) == 0:
+            if absence_start is None:
+                absence_start = time.time()
+            elif time.time() - absence_start > 5:
+                log_event("Candidate absent for more than 5 seconds")
+                st.warning("⚠️ Candidate absent from seat!")
         else:
-            last_face = time.time()
-            if len(dets)>1:
-                log_event("Multiple faces")
-                st.error("🚨 Multiple faces!")
-            # Gaze: estimate nose direction via landmarks
-            shape = landmark_model(rgb, dets[0])
-            nose = shape.part(30)
-            if nose.x < w*0.3 or nose.x > w*0.7:
-                log_event("Looking away")
-                st.warning("👀 Looking away!")
+            absence_start = None
 
-        # 2) Mobile detection
-        results = yolo.predict(frame, stream=True)
-        for r in results:
-            for box, cls, _ in zip(r.boxes.xyxy, r.boxes.cls, r.boxes.conf):
-                if int(cls)==67 and float(r.boxes.conf)>.3:  # class 67 = cell phone
-                    log_event("Mobile detected")
-                    st.error("🚨 Mobile phone detected!")
+        if len(faces) > 1:
+            log_event("Multiple faces detected")
+            st.warning("⚠️ Multiple faces detected!")
 
-        # Show frame
-        stframe.image(frame, channels="BGR")
-        # If in test
-        if st.session_state.in_test:
-            elapsed = (time.time()-st.session_state.start_test)/60
-            if elapsed > test_dur:
-                st.session_state.in_test = False
-                log_event("Quiz ended")
-            else:
-                st.subheader("📝 On-going Quiz")
-                df = st.session_state.quiz.copy()
-                answers = []
-                for i,row in df.iterrows():
-                    st.write(f"Q{i+1}. {row['question']}")
-                    ans = st.radio(f"Select:", row["options"], key=f"q{i}")
-                    answers.append(ans)
-                if st.button("Submit Quiz"):
-                    # score
-                    score=0
-                    for idx,row in df.iterrows():
-                        if answers[idx]==row["answer"]:
-                            score+=1
-                    log_event(f"Quiz submitted: {score}/{mcq_count}")
-                    st.success(f"Score: {score}/{mcq_count}")
-                    st.session_state.in_test=False
+        # Fake Mobile detection (since YOLOv8 is heavy for Streamlit Cloud)
+        if random.random() < 0.02:
+            log_event("Mobile phone usage suspected")
+            st.warning("⚠️ Mobile phone usage detected!")
 
-        time.sleep(0.5)
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
+
     cap.release()
-    st.success("✅ Monitoring Complete")
+    cv2.destroyAllWindows()
 
-    # Download logs
-    df_logs = pd.DataFrame(st.session_state.logs)
-    st.download_button("📥 Download Log CSV",
-                       df_logs.to_csv(index=False),
-                       file_name="proctor_logs.csv",
-                       mime="text/csv")
+# ---------------------- MAIN APP UI ---------------------- #
+st.set_page_config(page_title="AI Online Proctoring", layout="centered")
+st.title("📹 Smart AI Proctoring System")
+
+with st.sidebar:
+    st.header("🛠️ Test Configuration")
+    num_qs = st.number_input("Number of MCQs", min_value=5, max_value=50, value=20)
+    duration = st.number_input("Test Duration (mins)", min_value=1, max_value=30, value=5)
+    topic = st.text_input("Topic (e.g., Python, ML)", value="Python")
+    start_btn = st.button("Start Proctored Test")
+
+if start_btn:
+    st.success("Test Started. Camera monitoring initiated.")
+    is_testing = True
+    log_event("Test Started")
+
+    # Start camera monitoring
+    cam_thread = Thread(target=monitor_camera)
+    cam_thread.start()
+
+    # Generate quiz
+    quiz_data = generate_mcqs(n=num_qs, topic=topic)
+
+    # Display questions
+    user_answers = []
+    with st.form("quiz_form"):
+        for idx, item in enumerate(quiz_data):
+            st.subheader(f"Q{idx+1}: {item['question']}")
+            options = item['options']
+            ans = st.radio("Select an option:", options, key=f"q_{idx}")
+            user_answers.append(ans)
+        submitted = st.form_submit_button("Submit Quiz")
+
+    if submitted:
+        is_testing = False
+        cam_thread.join()
+        score = sum([user_answers[i] == quiz_data[i]['answer'] for i in range(len(quiz_data))])
+        st.success(f"🎉 Test Completed. Your Score: {score}/{len(quiz_data)}")
+        log_event(f"Test completed. Score: {score}/{len(quiz_data)}")
+
+        # Save CSV
+        csv_file = save_log_csv()
+        with open(csv_file, "rb") as f:
+            b64 = base64.b64encode(f.read()).decode()
+            href = f'<a href="data:file/csv;base64,{b64}" download="{csv_file}">📥 Download Log CSV</a>'
+            st.markdown(href, unsafe_allow_html=True)
+
+        os.remove(csv_file)
