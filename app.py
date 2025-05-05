@@ -14,22 +14,7 @@ import json
 import base64
 from groq import Groq
 
-# ---------------------- DOWNLOAD DLIB MODEL IF NEEDED ---------------------- #
-def download_dlib_model():
-    url = "http://dlib.net/files/shape_predictor_68_face_landmarks.dat.bz2"
-    bz2_file = "shape_predictor_68_face_landmarks.dat.bz2"
-    dat_file = "shape_predictor_68_face_landmarks.dat"
-
-    if not os.path.exists(dat_file):
-        st.info("Downloading facial landmark model (~100MB)...")
-        urllib.request.urlretrieve(url, bz2_file)
-        with bz2.BZ2File(bz2_file) as fr, open(dat_file, "wb") as fw:
-            fw.write(fr.read())
-        os.remove(bz2_file)
-        st.success("Model downloaded and ready.")
-
 # ---------------------- GLOBAL VARIABLES ---------------------- #
-download_dlib_model()
 log_data = []
 quiz_data = []
 is_testing = False
@@ -49,17 +34,28 @@ def save_log_csv():
 
 def generate_mcqs(n=20, topic="Python"):
     client = Groq(api_key=os.getenv("GROQ_API_KEY"))
-    prompt = f"Generate {n} multiple choice questions with 4 options each and answer key on topic {topic}. Output as JSON."
-    response = client.chat.completions.create(
-        model="llama3-70b-8192",
-        messages=[{"role": "user", "content": prompt}]
+    prompt = (
+        f"Generate {n} multiple choice questions with 4 options each and answer key on topic '{topic}'. "
+        "Output ONLY valid JSON in the following format: "
+        "[{\"question\": \"...\", \"options\": [\"A\", \"B\", \"C\", \"D\"], \"answer\": \"A\"}, ...]. "
+        "No explanations, no markdown, just JSON."
     )
+
     try:
+        response = client.chat.completions.create(
+            model="llama3-70b-8192",
+            messages=[{"role": "user", "content": prompt}]
+        )
         content = response.choices[0].message.content
-        return json.loads(content)
-    except:
-        st.error("Failed to parse questions.")
-        return []
+        st.write("Raw response:", content)  # Debugging output
+        parsed = json.loads(content)
+        return parsed
+    except Exception as e:
+        st.error(f"Failed to parse questions. Using fallback. Error: {e}")
+        return [
+            {"question": "Placeholder Q1", "options": ["A", "B", "C", "D"], "answer": "A"},
+            {"question": "Placeholder Q2", "options": ["A", "B", "C", "D"], "answer": "B"}
+        ]
 
 # ---------------------- CAMERA MONITORING ---------------------- #
 def monitor_camera():
@@ -87,7 +83,7 @@ def monitor_camera():
             log_event("Multiple faces detected")
             st.warning("⚠️ Multiple faces detected!")
 
-        # Fake Mobile detection (since YOLOv8 is heavy for Streamlit Cloud)
+        # Fake Mobile detection (placeholder)
         if random.random() < 0.02:
             log_event("Mobile phone usage suspected")
             st.warning("⚠️ Mobile phone usage detected!")
