@@ -110,7 +110,6 @@ with st.sidebar:
     start_btn = st.button("Start Proctored Test")
 
 if start_btn:
-    global is_testing
     is_testing = True
     st.success("Test Started. Camera monitoring initiated.")
     log_event("Test Started")
