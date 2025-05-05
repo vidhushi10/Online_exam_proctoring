@@ -63,6 +63,7 @@ def generate_mcqs(n=20, topic="Python"):
 
 # ---------------------- CAMERA MONITORING ---------------------- #
 def monitor_camera():
+    global is_testing
     cap = cv2.VideoCapture(0)
     absence_start = None
     while is_testing:
@@ -109,9 +110,9 @@ with st.sidebar:
     start_btn = st.button("Start Proctored Test")
 
 if start_btn:
-    st.success("Test Started. Camera monitoring initiated.")
     global is_testing
     is_testing = True
+    st.success("Test Started. Camera monitoring initiated.")
     log_event("Test Started")
 
     cam_thread = Thread(target=monitor_camera)
