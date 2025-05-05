@@ -46,8 +46,12 @@ def generate_mcqs(n=20, topic="Python"):
             model="llama3-70b-8192",
             messages=[{"role": "user", "content": prompt}]
         )
+        st.write("Full Groq API response:", response)  # Debugging: full response
+        if not response or not response.choices:
+            st.error("Groq API returned no choices.")
+            raise ValueError("Empty response.")
         content = response.choices[0].message.content
-        st.write("Raw response:", content)  # Debugging output
+        st.write("Raw content:", content)  # Debugging: raw content
         parsed = json.loads(content)
         return parsed
     except Exception as e:
@@ -83,7 +87,6 @@ def monitor_camera():
             log_event("Multiple faces detected")
             st.warning("⚠️ Multiple faces detected!")
 
-        # Fake Mobile detection (placeholder)
         if random.random() < 0.02:
             log_event("Mobile phone usage suspected")
             st.warning("⚠️ Mobile phone usage detected!")
@@ -107,17 +110,15 @@ with st.sidebar:
 
 if start_btn:
     st.success("Test Started. Camera monitoring initiated.")
+    global is_testing
     is_testing = True
     log_event("Test Started")
 
-    # Start camera monitoring
     cam_thread = Thread(target=monitor_camera)
     cam_thread.start()
 
-    # Generate quiz
     quiz_data = generate_mcqs(n=num_qs, topic=topic)
 
-    # Display questions
     user_answers = []
     with st.form("quiz_form"):
         for idx, item in enumerate(quiz_data):
@@ -134,7 +135,6 @@ if start_btn:
         st.success(f"🎉 Test Completed. Your Score: {score}/{len(quiz_data)}")
         log_event(f"Test completed. Score: {score}/{len(quiz_data)}")
 
-        # Save CSV
         csv_file = save_log_csv()
         with open(csv_file, "rb") as f:
             b64 = base64.b64encode(f.read()).decode()
